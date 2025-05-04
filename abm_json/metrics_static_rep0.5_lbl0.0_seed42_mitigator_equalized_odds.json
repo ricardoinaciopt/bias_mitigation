@@ -1,0 +1,46 @@
+{
+  "meta": {
+    "mode": "static",
+    "representation_bias": 0.5,
+    "label_bias": 0.0,
+    "seed": 42,
+    "reweighting_enabled": false,
+    "reweighting_mode": "none",
+    "manual_group_weights": null,
+    "model": "XGBoost",
+    "calibration": "None"
+  },
+  "overall_metrics": {
+    "roc_auc": 0.9908447265625,
+    "accuracy": 0.96875,
+    "precision": 0.953125,
+    "recall": 0.953125,
+    "log_loss": 0.10733717535104177
+  },
+  "by_group": {
+    "A": {
+      "roc_auc": 0.9858490566037736,
+      "log_loss": 0.13791276555854876,
+      "accuracy": 0.9541284403669725,
+      "precision": 0.9615384615384616,
+      "recall": 0.9433962264150944,
+      "FPR": 0.03571428571428571,
+      "approval_rate": 0.47706422018348627
+    },
+    "B": {
+      "roc_auc": 1.0,
+      "log_loss": 0.067183689415882,
+      "accuracy": 0.9879518072289156,
+      "precision": 0.9166666666666666,
+      "recall": 1.0,
+      "FPR": 0.013888888888888888,
+      "approval_rate": 0.14457831325301204
+    }
+  },
+  "bias_metrics": {
+    "SPD": 0.3324859069304742,
+    "EOD": -0.05660377358490565,
+    "AOD": 0.03921458520515124,
+    "PrecisionDiff": 0.044871794871794934
+  }
+}
