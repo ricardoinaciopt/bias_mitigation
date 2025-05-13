@@ -37,9 +37,9 @@ from OnlineClassifier import OnlineApprovalClassifier
 from explainability_wrapper import explainability_analysis
 
 
-MAX_TICKS = 5000
-ARRIVAL_RATE = 0.25
-APPROVAL_THRESHOLD = 40
+MAX_TICKS = 10000
+ARRIVAL_RATE = 0.8
+APPROVAL_THRESHOLD = 30
 CSV_DIR, JSON_DIR, XAI_DIR = "abm_csv", "abm_json", "explainability_results"
 NOISE_QUAL = 0.05
 
@@ -83,9 +83,6 @@ def save_fairness_json(
     group_weights: dict | None = None,
 ):
     try:
-        # if reweight:
-        #     suffix = "_rw_manual" if group_weights else "_rw_auto"
-        #     path = str(path).replace(".json", f"{suffix}.json")
 
         out = {
             "meta": replace_nans(meta),
@@ -115,7 +112,7 @@ FEATURES = [
     "num_children",
     "loan_amount",
     "loan_purpose",
-    "trust",
+    # "trust",
     "fin_lit",
 ]
 
@@ -289,12 +286,12 @@ def _calculate_final_metrics(
 
     for g in ["A", "B"]:
         g_df = results_df[results_df["group"] == g]
+        group_metrics[g] = {"support": len(g_df)}
         if g_df.empty:
-            group_metrics[g] = nan_metrics_template.copy()
+            group_metrics[g].update(nan_metrics_template.copy())
             continue
 
         y_true_g, y_pred_g, y_proba_g = g_df["actual"], g_df["predicted"], g_df["proba"]
-        group_metrics[g] = {}
 
         tn, fp, fn, tp = 0, 0, 0, 0
         if len(set(y_true_g)) > 1:
@@ -334,16 +331,16 @@ def _calculate_final_metrics(
 
     gA_metrics, gB_metrics = group_metrics["A"], group_metrics["B"]
     bias_metrics = {
-        "SPD": gA_metrics.get("approval_rate", np.nan)
-        - gB_metrics.get("approval_rate", np.nan),
-        "EOD": gA_metrics.get("recall", np.nan) - gB_metrics.get("recall", np.nan),
+        "SPD": gB_metrics.get("approval_rate", np.nan)
+        - gA_metrics.get("approval_rate", np.nan),
+        "EOD": gB_metrics.get("recall", np.nan) - gA_metrics.get("recall", np.nan),
         "AOD": 0.5
         * (
             abs(gA_metrics.get("recall", np.nan) - gB_metrics.get("recall", np.nan))
             + abs(gA_metrics.get("FPR", np.nan) - gB_metrics.get("FPR", np.nan))
         ),
-        "PrecisionDiff": gA_metrics.get("precision", np.nan)
-        - gB_metrics.get("precision", np.nan),
+        "PrecisionDiff": gB_metrics.get("precision", np.nan)
+        - gA_metrics.get("precision", np.nan),
     }
 
     return overall_metrics, group_metrics, bias_metrics
@@ -387,7 +384,10 @@ def _process_agents_online(
 
         x_df = pd.DataFrame([x_dict])
         proba = model.predict_proba(x_df)[0, 1]
-        pred = int(proba >= 0.5)
+        # pred = int(proba >= 0.5)
+        # use computed threshold
+        pred_arr = model.predict(x_df)
+        pred = pred_arr[0, 1] if pred_arr.ndim == 2 else pred_arr[0]
 
         model.update(x_df, pd.Series([y_true]), pd.Series([group]))
 
@@ -550,8 +550,8 @@ def run_dynamic(
         "remove_poor_attrs": [False, True],
         "merit_preprune": [True, False],
     }
-    # For consistency with RandomizedSearchCV (on static, which performs by default 10 iterations), n_iter is set to 10.
-    sampled_params = list(ParameterSampler(param_grid, n_iter=10, random_state=seed))
+    # For consistency with RandomizedSearchCV (on static, which performs 3 iterations), n_iter is set to 10.
+    sampled_params = list(ParameterSampler(param_grid, n_iter=3, random_state=seed))
     best_score = -np.inf
     best_params = None
 
@@ -846,6 +846,7 @@ def run_static(
         param_distributions=param_dist,
         scoring="roc_auc",
         n_jobs=-1,
+        n_iter=3,
         random_state=seed,
     )
 

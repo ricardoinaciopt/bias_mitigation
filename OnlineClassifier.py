@@ -15,7 +15,7 @@ from fairlearn.reductions import (
 
 
 class StabilizedOnlineReweighter:
-    def __init__(self, alpha=0.001, warmup=200, clip_min=0.1, clip_max=5.0):
+    def __init__(self, alpha=0.001, warmup=100, clip_min=0.1, clip_max=5.0):
         self.alpha = alpha
         self.warmup = warmup
         self.clip_min = clip_min
@@ -59,7 +59,7 @@ class OnlineApprovalClassifier:
 
     def __init__(
         self,
-        update_interval: int = 10,
+        update_interval: int = 100,
         calibrate_interval: int = 100,
         retrain_interval: int = None,
         reweight: bool = False,
@@ -69,7 +69,7 @@ class OnlineApprovalClassifier:
         **model_params,
     ):
 
-        self.update_interval = max(1, update_interval)
+        self.update_interval = min(1, update_interval)
         self.calibrate_interval = max(self.update_interval, calibrate_interval)
         self.retrain_interval = retrain_interval or self.calibrate_interval
         self.reweight = reweight
@@ -137,7 +137,7 @@ class OnlineApprovalClassifier:
             self._mitBuffery.append(y)
             self._mitBufferg.append(g)
 
-            self._samples_seen_since_retrain = 1
+            self._samples_seen_since_retrain += 1
 
     def _raw_proba_one(self, x: dict) -> float:
         """Get the raw probability estimate from the tree for positive classifications."""
@@ -214,6 +214,9 @@ class OnlineApprovalClassifier:
         if X.empty:
             return np.array([])
         proba = self.predict_proba(X)
+        if self.use_mitigator and self.mitigator_model is not None:
+            # use threshold from ExponentiatedGradient
+            return self.mitigator_model.predict(X)
         return (proba >= 0.5).astype(int)
 
     def update(self, X: pd.DataFrame, y: pd.Series, groups: pd.Series):
@@ -232,7 +235,7 @@ class OnlineApprovalClassifier:
         """Learn from buffered data and manage calibration."""
         if not self._bufy:
             return
-        logging.debug("Flushing buffers. Size: %d", len(self._bufy))
+        logging.info("Flushing buffers. Size: %d", len(self._bufy))
 
         for x_, y_, g_ in zip(self._bufX, self._bufy, self._bufG):
             self._learn_one(x_, y_, g_)
@@ -252,7 +255,6 @@ class OnlineApprovalClassifier:
                 or self._samples_seen_since_retrain >= self.retrain_interval
             ):
                 self._fit_mitigator_rolling()
-                self._mitigator_fitted = True
                 self._samples_seen_since_retrain = 0
                 self._mitigator_fitted = True
             elif not self.use_mitigator:
@@ -275,7 +277,7 @@ class OnlineApprovalClassifier:
         finite_mask = np.isfinite(cal_X_arr) & np.isfinite(cal_y_arr)
         unique_classes = len(np.unique(cal_y_arr[finite_mask]))
 
-        if np.sum(finite_mask) >= 10 and unique_classes > 1:
+        if np.sum(finite_mask) >= 5 and unique_classes > 1:
             logging.info(
                 "Fitting IsotonicRegression on %d points.", np.sum(finite_mask)
             )
@@ -290,7 +292,7 @@ class OnlineApprovalClassifier:
                 self.iso = None
         else:
             logging.warning(
-                "Skipping IsotonicRegression fit: Need >= 10 finite points and > 1 class. "
+                "Skipping IsotonicRegression fit: Need > 1 classes. "
                 "Points: %d, Classes: %d",
                 np.sum(finite_mask),
                 unique_classes,
@@ -302,7 +304,7 @@ class OnlineApprovalClassifier:
             len(self._mitBuffery),
         )
         if (
-            len(self._mitBuffery) < self.calibrate_interval // 2
+            len(self._mitBuffery) < self.calibrate_interval
             or len(set(self._mitBuffery)) < 2
         ):
             logging.warning("Not enough data or class diversity; skipping fit.")
@@ -315,15 +317,13 @@ class OnlineApprovalClassifier:
         if hasattr(self, "_best_xgb_params"):
             base_model = xgb(
                 objective="binary:logistic",
-                eval_metric="logloss",
                 random_state=42,
                 **self._best_xgb_params,
             )
-            base_model.set_params(process_type="update", refresh_leaf=True)
+            base_model.set_params(process_type="default", refresh_leaf=True)
         else:
             base_model = xgb(
                 objective="binary:logistic",
-                eval_metric="logloss",
                 random_state=42,
             )
 
@@ -338,7 +338,12 @@ class OnlineApprovalClassifier:
                 "min_child_weight": [1, 3, 5],
             }
             base_model = RandomizedSearchCV(
-                base_model, param_distributions=param_dist, n_jobs=-1, random_state=42
+                base_model,
+                param_distributions=param_dist,
+                scoring="roc_auc",
+                n_jobs=-1,
+                n_iter=3,
+                random_state=42,
             )
             base_model.fit(X_df, y)
             self._best_xgb_params = base_model.best_params_
@@ -351,8 +356,6 @@ class OnlineApprovalClassifier:
             if self.fairness_constraint == "equalized_odds"
             else DemographicParity()
         )
-        mitigator = ExponentiatedGradient(
-            estimator=best_est, constraints=constraint, eps=0.01
-        )
+        mitigator = ExponentiatedGradient(estimator=best_est, constraints=constraint)
         mitigator.fit(X_df, y, sensitive_features=g)
         self.mitigator_model = mitigator

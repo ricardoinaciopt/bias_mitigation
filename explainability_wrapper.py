@@ -7,7 +7,8 @@ import numpy as np
 import pandas as pd
 import logging
 
-SHAP_SUBSET = 100
+SHAP_SUBSET = 250
+SECOND_ORDER_INSTANCES = 1
 
 
 def explainability_analysis(
@@ -59,7 +60,7 @@ def explainability_analysis(
         plt.figure()
         shap.summary_plot(sv, X_test, feature_names=feature_names, show=False)
         shp_path = os.path.join(output_dir, f"{prefix}_shap_summary.pdf")
-        plt.savefig(shp_path, bbox_inches="tight", dpi=800)
+        plt.savefig(shp_path, bbox_inches="tight", dpi=500)
         plt.close()
         logging.info("SHAP summary saved to %s", shp_path)
     except Exception as e:
@@ -75,8 +76,8 @@ def explainability_analysis(
             max_order=2,
             random_state=42,
         )
-        # shap_iq allows only explanations of interactions (second order) for one instance at a time. Using only the first 5 instances of X_test.
-        for idx, row in X_test.head(5).iterrows():
+        # shap_iq allows only explanations of interactions (second order) for one instance at a time. Using only the first SECOND_ORDER_INSTANCES instances of X_test.
+        for idx, row in X_test.head(SECOND_ORDER_INSTANCES).iterrows():
             element = "instance"
             try:
                 logging.info("Explaining %s %d", element, idx)
@@ -89,26 +90,26 @@ def explainability_analysis(
                         iv,
                     )
                 # stacked‐bar for this instance
-                try:
-                    logging.info("Generating stacked-bar plot for %s %d", element, idx)
-                    out_bar = stacked_bar_plot(
-                        iv, feature_names=feature_names, show=False
-                    )
-                    fig_bar = out_bar[0] if isinstance(out_bar, tuple) else out_bar
-                    fig_bar.savefig(
-                        os.path.join(
-                            output_dir, f"{prefix}_{element}{idx}_stacked_bar.pdf"
-                        ),
-                        bbox_inches="tight",
-                        dpi=800,
-                    )
-                    plt.close(fig_bar)
-                except Exception as e:
-                    logging.error(
-                        "Failed to generate stacked-bar plot for instance %d: %s",
-                        idx,
-                        e,
-                    )
+                # try:
+                #     logging.info("Generating stacked-bar plot for %s %d", element, idx)
+                #     out_bar = stacked_bar_plot(
+                #         iv, feature_names=feature_names, show=False
+                #     )
+                #     fig_bar = out_bar[0] if isinstance(out_bar, tuple) else out_bar
+                #     fig_bar.savefig(
+                #         os.path.join(
+                #             output_dir, f"{prefix}_{element}{idx}_stacked_bar.pdf"
+                #         ),
+                #         bbox_inches="tight",
+                #         dpi=500,
+                #     )
+                #     plt.close(fig_bar)
+                # except Exception as e:
+                #     logging.error(
+                #         "Failed to generate stacked-bar plot for instance %d: %s",
+                #         idx,
+                #         e,
+                #     )
 
                 # upset plot
                 try:
@@ -125,7 +126,7 @@ def explainability_analysis(
                             output_dir, f"{prefix}_{element}{idx}_upset_plot.pdf"
                         ),
                         bbox_inches="tight",
-                        dpi=800,
+                        dpi=500,
                     )
                     plt.close(fig_up)
                 except Exception as e:
@@ -148,7 +149,7 @@ def explainability_analysis(
                             output_dir, f"{prefix}_{element}{idx}_network_plot.pdf"
                         ),
                         bbox_inches="tight",
-                        dpi=800,
+                        dpi=500,
                     )
                     plt.close(fig_net)
                 except Exception as e:

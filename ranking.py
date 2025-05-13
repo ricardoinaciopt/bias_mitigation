@@ -1,7 +1,7 @@
 """
 --mode   Which subset of files to evaluate. If omitted the script uses *both*.
 --dir    Directory with the *.json metric files (default: abm_json).
---out    Path for the textual report (default: evaluation.txt).
+--out    Path for the textual report (default: ranking.txt).
 
 Ranking methodology
 -------------------
@@ -45,13 +45,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--out",
-        help="Destination text file for the evaluation report",
+        help="Destination text file for the ranking report",
     )
     args = parser.parse_args()
 
     if args.out is None:
-        eval_dir = Path("evaluation")
-        args.out = eval_dir / f"evaluation_{args.mode}.txt"
+        eval_dir = Path("ranking")
+        args.out = eval_dir / f"ranking_{args.mode}.txt"
 
     return args
 

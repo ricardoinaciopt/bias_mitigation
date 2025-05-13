@@ -29,7 +29,8 @@ configs = [
         "xai": args.xai,  # Use parsed xai flag
     }
     for setting, lbl, rep, group_weights, use_mitigator, fairness_constraint in itertools.product(
-        ["static", "dynamic"],
+        # ["static", "dynamic"],
+        ["static"],
         lbl_list,
         rep_list,
         group_weights_list,
