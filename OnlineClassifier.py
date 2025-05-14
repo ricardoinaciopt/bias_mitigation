@@ -31,7 +31,7 @@ class StabilizedOnlineReweighter:
         self.count += 1
         # update total EMA
         self.ema_total = (1 - self.alpha) * self.ema_total + self.alpha
-        # update class EMA
+        # update target EMA
         self.ema_y[y] = (1 - self.alpha) * self.ema_y[y] + self.alpha
         # update group EMA
         self.ema_g[g] = (1 - self.alpha) * self.ema_g[g] + self.alpha
@@ -59,7 +59,7 @@ class OnlineApprovalClassifier:
 
     def __init__(
         self,
-        update_interval: int = 100,
+        update_interval: int = 10,
         calibrate_interval: int = 100,
         retrain_interval: int = None,
         reweight: bool = False,
@@ -69,15 +69,17 @@ class OnlineApprovalClassifier:
         **model_params,
     ):
 
-        self.update_interval = min(1, update_interval)
+        self.update_interval = max(1, update_interval)
         self.calibrate_interval = max(self.update_interval, calibrate_interval)
-        self.retrain_interval = retrain_interval or self.calibrate_interval
+        self.retrain_interval = retrain_interval or self.update_interval
         self.reweight = reweight
         self.group_weights = group_weights
         self.use_mitigator = use_mitigator
         self.fairness_constraint = fairness_constraint
         self.mitigator_model = None
         self._mitigator_fitted = False
+        self._booster_cache = None  # holds the growing xgboost.Booster
+        self._best_xgb_params = None  # remembered after first tuning
 
         self.tree = tree.HoeffdingTreeClassifier(**model_params)
         self.scaler = river_preprocessing.StandardScaler()
@@ -107,9 +109,9 @@ class OnlineApprovalClassifier:
         self._samples_seen_since_retrain = 0
 
         # buffers for rolling‑window mitigator
-        self._mitBufferX = deque(maxlen=self.calibrate_interval)
-        self._mitBuffery = deque(maxlen=self.calibrate_interval)
-        self._mitBufferg = deque(maxlen=self.calibrate_interval)
+        self._mitBufferX = deque(maxlen=self.update_interval)
+        self._mitBuffery = deque(maxlen=self.update_interval)
+        self._mitBufferg = deque(maxlen=self.update_interval)
 
     def _get_weight(self, g: str | Any, y: int) -> float:
         """Calculates the sample weight based on the active reweighting strategy."""
@@ -162,9 +164,20 @@ class OnlineApprovalClassifier:
             )
             return np.full(len(X), 0.5)
 
-        probas = np.array(
-            [est.predict_proba(X)[:, 1] for est in self.mitigator_model.predictors_]
-        )
+        # handle both 1D and 2D outputs from predict_proba
+        probas = []
+        for est in self.mitigator_model.predictors_:
+            p = est.predict_proba(X)
+            if p.ndim == 1:
+                # P(1)
+                probas.append(p)
+            elif p.shape[1] == 2:
+                # 2-column
+                probas.append(p[:, 1])
+            else:
+                # fallback to 0.5
+                probas.append(np.full(len(X), 0.5))
+        probas = np.array(probas)
         weights = np.array(self.mitigator_model.weights_)
         return np.average(probas, axis=0, weights=weights)
 
@@ -208,7 +221,7 @@ class OnlineApprovalClassifier:
         return np.column_stack((proba_0, proba_1))
 
     def predict(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
-        """Predict class labels (0 or 1) for a batch of instances."""
+        """Predict labels (0 or 1) for a batch of instances."""
         if isinstance(X, np.ndarray):
             X = pd.DataFrame(X)
         if X.empty:
@@ -228,7 +241,12 @@ class OnlineApprovalClassifier:
         self._bufy.extend(y.tolist())
         self._bufG.extend(groups.tolist())
 
-        if len(self._bufy) >= self.update_interval:
+        if self.use_mitigator:
+            interval = self.update_interval
+        else:
+            interval = self.calibrate_interval
+
+        if len(self._bufy) >= interval:
             self._flush_buffers()
 
     def _flush_buffers(self):
@@ -249,17 +267,17 @@ class OnlineApprovalClassifier:
         if self._samples_seen_since_cal >= self.calibrate_interval:
             self._interval_reached = True
 
-        if self._interval_reached:
-            if self.use_mitigator and (
-                not self._mitigator_fitted
-                or self._samples_seen_since_retrain >= self.retrain_interval
-            ):
-                self._fit_mitigator_rolling()
-                self._samples_seen_since_retrain = 0
-                self._mitigator_fitted = True
-            elif not self.use_mitigator:
-                self._fit_calibration()
+        if self._interval_reached and not self.use_mitigator:
+            self._fit_calibration()
             self._interval_reached = False
+
+        if self.use_mitigator and (
+            not self._mitigator_fitted
+            or self._samples_seen_since_retrain >= self.retrain_interval
+        ):
+            self._fit_mitigator_rolling()
+            self._samples_seen_since_retrain = 0
+            self._mitigator_fitted = True
 
         self._bufX.clear()
         self._bufy.clear()
@@ -277,7 +295,7 @@ class OnlineApprovalClassifier:
         finite_mask = np.isfinite(cal_X_arr) & np.isfinite(cal_y_arr)
         unique_classes = len(np.unique(cal_y_arr[finite_mask]))
 
-        if np.sum(finite_mask) >= 5 and unique_classes > 1:
+        if np.sum(finite_mask) >= 10 and unique_classes > 1:
             logging.info(
                 "Fitting IsotonicRegression on %d points.", np.sum(finite_mask)
             )
@@ -300,62 +318,76 @@ class OnlineApprovalClassifier:
 
     def _fit_mitigator_rolling(self):
         logging.info(
-            "Rolling-window mitigator fit on last %d samples.",
-            len(self._mitBuffery),
+            "Rolling-window mitigator fit on last %d samples.", len(self._mitBuffery)
         )
+
         if (
-            len(self._mitBuffery) < self.calibrate_interval
+            len(self._mitBuffery) < self.update_interval
             or len(set(self._mitBuffery)) < 2
         ):
             logging.warning("Not enough data or class diversity; skipping fit.")
             return
 
-        X_df = pd.DataFrame(list(self._mitBufferX))
+        X_df = pd.DataFrame(self._mitBufferX)
         y = np.fromiter(self._mitBuffery, dtype=int)
         g = np.fromiter(self._mitBufferg, dtype=object)
 
-        if hasattr(self, "_best_xgb_params"):
-            base_model = xgb(
+        if self._booster_cache is None:
+            logging.info("Inital tuning of online mitigator…")
+            base = xgb(
                 objective="binary:logistic",
                 random_state=42,
-                **self._best_xgb_params,
             )
-            base_model.set_params(process_type="default", refresh_leaf=True)
+            param_dist = {
+                "n_estimators": [80, 120, 160],
+                "learning_rate": [0.05, 0.1],
+                "max_depth": [3, 5],
+                "subsample": [0.7, 0.9, 1.0],
+                "colsample_bytree": [0.7, 0.9, 1.0],
+            }
+            search = RandomizedSearchCV(
+                base,
+                param_dist,
+                scoring="roc_auc",
+                n_iter=3,
+                n_jobs=-1,
+                random_state=42,
+            ).fit(X_df, y)
+
+            best_est = search.best_estimator_
+            self._best_xgb_params = search.best_params_
+            self._booster_cache = best_est.get_booster()
+
         else:
-            base_model = xgb(
+            # incremental update
+            incr_trees = 40  # how many new trees (half the minimum possible number of estimator from tuning)
+            inc_params = self._best_xgb_params.copy()
+            inc_params.pop("n_estimators", None)
+            inc_params["n_estimators"] = incr_trees
+            inc_params.setdefault("tree_method", "approx")
+
+            best_est = xgb(
                 objective="binary:logistic",
                 random_state=42,
+                **inc_params,
             )
 
-        if not hasattr(self, "_best_xgb_params"):
-            param_dist = {
-                "n_estimators": [100, 200, 300, 400],
-                "learning_rate": [0.01, 0.05, 0.1, 0.2],
-                "max_depth": [3, 5, 7, 9],
-                "subsample": [0.6, 0.7, 0.8, 0.9, 1.0],
-                "colsample_bytree": [0.6, 0.7, 0.8, 0.9, 1.0],
-                "gamma": [0, 0.1, 0.5, 1],
-                "min_child_weight": [1, 3, 5],
-            }
-            base_model = RandomizedSearchCV(
-                base_model,
-                param_distributions=param_dist,
-                scoring="roc_auc",
-                n_jobs=-1,
-                n_iter=3,
-                random_state=42,
+            best_est.fit(
+                X_df,
+                y,
+                xgb_model=self._booster_cache,  # append new trees
+                verbose=False,
             )
-            base_model.fit(X_df, y)
-            self._best_xgb_params = base_model.best_params_
-            best_est = base_model.best_estimator_
-        else:
-            best_est = base_model.fit(X_df, y)
+            self._booster_cache = best_est.get_booster()
 
         constraint = (
             EqualizedOdds()
             if self.fairness_constraint == "equalized_odds"
             else DemographicParity()
         )
-        mitigator = ExponentiatedGradient(estimator=best_est, constraints=constraint)
+
+        mitigator = ExponentiatedGradient(
+            estimator=best_est, constraints=constraint, max_iter=10
+        )
         mitigator.fit(X_df, y, sensitive_features=g)
         self.mitigator_model = mitigator

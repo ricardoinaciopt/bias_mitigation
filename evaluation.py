@@ -32,18 +32,18 @@ def detect_variant(name: str) -> str:
     return "none"
 
 
-def load_df(folder: str, model: str | None, want_groups: bool) -> pd.DataFrame:
+def load_df(folder: str, setting: str | None, want_groups: bool) -> pd.DataFrame:
     pat = re.compile(
-        r"metrics_(?P<model>[^_]+)_rep(?P<rep>\d+\.\d+)_lbl(?P<lbl>\d+\.\d+)"
+        r"metrics_(?P<setting>[^_]+)_rep(?P<rep>\d+\.\d+)_lbl(?P<lbl>\d+\.\d+)"
     )
     rows = []
     for f in Path(folder).glob("metrics_*_lbl*.json"):
         m = pat.match(PurePath(f).name)
-        if not m or (model and m["model"] != model):
+        if not m or (setting and m["setting"] != setting):
             continue
         d = json.loads(f.read_text())
         row = {
-            "model": m["model"],
+            "setting": m["setting"],
             "rep": float(m["rep"]),
             "lbl": float(m["lbl"]),
             "variant": detect_variant(f.name),
@@ -97,7 +97,6 @@ def render(df: pd.DataFrame) -> str:
 def write_tables(
     df: pd.DataFrame,
     want_groups: bool,
-    path_txt: Path,
     use_color: bool,
     summary_counts: dict,
     variant_order=variant_order,
@@ -138,104 +137,88 @@ def write_tables(
             return f"{c} (~0)"
         if c in perf_low or c in {"rank_perf", "rank_fair"}:
             return f"{c} (↓)"
-        # For group-wise metrics, use ↑ for accuracy/recall/approval_rate/precision
         if any(x in c for x in ["accuracy", "recall", "approval_rate", "precision"]):
             return f"{c} (↑)"
         return c
 
     header_cols = [metric_arrow(c) for c in cols]
 
-    with open(path_txt, "w", encoding="utf-8") as fh:
-        for (model, rep, lbl), g in df.groupby(["model", "rep", "lbl"]):
-            support_A = None
-            support_B = None
-            if "A_support" in g.columns and "B_support" in g.columns:
-                support_A = g.iloc[0]["A_support"]
-                support_B = g.iloc[0]["B_support"]
-            hdr = f"\n=== {model.upper()} | rep={rep} | lbl={lbl}"
-            if support_A is not None and support_B is not None:
-                hdr += f" | A_support={support_A} | B_support={support_B}"
-            hdr += " ==="
-            print(hdr)
-            fh.write(hdr + "\n")
+    for (setting, rep, lbl), g in df.groupby(["setting", "rep", "lbl"]):
+        support_A = None
+        support_B = None
+        if "A_support" in g.columns and "B_support" in g.columns:
+            support_A = g.iloc[0]["A_support"]
+            support_B = g.iloc[0]["B_support"]
+        hdr = f"\n=== {setting.upper()} | rep={rep} | lbl={lbl}"
+        if support_A is not None and support_B is not None:
+            hdr += f" | A_support={support_A} | B_support={support_B}"
+        hdr += " ==="
+        print(hdr)
 
-            block = g.copy()
-            block["order"] = block["variant"].apply(variant_order.index)
-            block = block.sort_values("order").drop(columns="order")
+        block = g.copy()
+        block["order"] = block["variant"].apply(variant_order.index)
+        block = block.sort_values("order").drop(columns="order")
 
-            perf_metrics = list(perf_high | perf_low)
-            fair_metrics = list(fair_abs_zero | fair_high)
+        perf_metrics = list(perf_high | perf_low)
+        fair_metrics = list(fair_abs_zero | fair_high)
 
-            sign = lambda m: 1 if (m in perf_high or m in fair_high) else -1
-            block["perf_score"] = (
-                block[perf_metrics]
-                .mul([sign(m) for m in perf_metrics], axis=1)
-                .sum(axis=1)
-            )
-            block["fair_score"] = -block[fair_metrics].abs().sum(axis=1)
-            block["rank_fair"] = block["fair_score"].rank(method="min", ascending=False)
+        sign = lambda m: 1 if (m in perf_high or m in fair_high) else -1
+        block["perf_score"] = (
+            block[perf_metrics].mul([sign(m) for m in perf_metrics], axis=1).sum(axis=1)
+        )
+        block["fair_score"] = -block[fair_metrics].abs().sum(axis=1)
+        block["rank_fair"] = block["fair_score"].rank(method="min", ascending=False)
 
-            block["rank_perf"] = block["perf_score"].rank(method="min", ascending=False)
-            block["rank_fair"] = block["fair_score"].rank(method="min", ascending=False)
+        block["rank_perf"] = block["perf_score"].rank(method="min", ascending=False)
+        block["rank_fair"] = block["fair_score"].rank(method="min", ascending=False)
 
-            for v in block.loc[block["rank_perf"] == 1, "variant"]:
-                summary_counts[v]["best_perf"] += 1
-            for v in block.loc[block["rank_perf"] == 2, "variant"]:
-                summary_counts[v]["second_perf"] += 1
-            for v in block.loc[block["rank_fair"] == 1, "variant"]:
-                summary_counts[v]["best_fair"] += 1
-            for v in block.loc[block["rank_fair"] == 2, "variant"]:
-                summary_counts[v]["second_fair"] += 1
+        for v in block.loc[block["rank_perf"] == 1, "variant"]:
+            summary_counts[v]["best_perf"] += 1
+        for v in block.loc[block["rank_perf"] == 2, "variant"]:
+            summary_counts[v]["second_perf"] += 1
+        for v in block.loc[block["rank_fair"] == 1, "variant"]:
+            summary_counts[v]["best_fair"] += 1
+        for v in block.loc[block["rank_fair"] == 2, "variant"]:
+            summary_counts[v]["second_fair"] += 1
 
-            block = colourise(block[cols], cols[1:], use_color)
-            block.columns = header_cols
-            table = render(block)
-            print(table + "\n")
-            fh.write(table + "\n")
+        block = colourise(block[cols], cols[1:], use_color)
+        block.columns = header_cols
+        table = render(block)
+        print(table + "\n")
 
-        if want_groups:
-            group_wins = {v: {"A": 0, "B": 0} for v in variant_order}
-            for (model, rep, lbl), g in df.groupby(["model", "rep", "lbl"]):
-                for group in ["A", "B"]:
-                    group_metrics = [m for m in groups if m.startswith(f"{group}_")]
-                    for m in group_metrics:
-                        vals = pd.to_numeric(g[m], errors="coerce")
-                        if vals.dropna().empty:
+    if want_groups:
+        group_wins = {v: {"A": 0, "B": 0} for v in variant_order}
+        for (setting, rep, lbl), g in df.groupby(["setting", "rep", "lbl"]):
+            for group in ["A", "B"]:
+                group_metrics = [m for m in groups if m.startswith(f"{group}_")]
+                for m in group_metrics:
+                    vals = pd.to_numeric(g[m], errors="coerce")
+                    if vals.dropna().empty:
+                        continue
+                    rank = vals.rank(method="min", ascending=False)
+                    for i, v in g["variant"].items():
+                        if pd.isna(vals[i]):
                             continue
-                        rank = vals.rank(method="min", ascending=False)
-                        for i, v in g["variant"].items():
-                            if pd.isna(vals[i]):
-                                continue
-                            if rank[i] == 1:
-                                group_wins[v][group] += 1
-            # Prepare summary DataFrame
-            group_wins_df = pd.DataFrame(group_wins).T.fillna(0).astype(int)
-            group_wins_df = group_wins_df.reindex(variant_order)
-            group_wins_df["total"] = group_wins_df["A"] + group_wins_df["B"]
-            group_wins_df = group_wins_df.sort_values(
-                ["total", "A", "B"], ascending=False
-            )
-            group_hdr = "\n=== GROUP-BASED WINS (times ranked 1st per group) ==="
-            print(group_hdr)
-            print(
-                render(group_wins_df.reset_index().rename(columns={"index": "variant"}))
-            )
-            fh.write(group_hdr + "\n")
-            fh.write(
-                render(group_wins_df.reset_index().rename(columns={"index": "variant"}))
-                + "\n"
-            )
+                        if rank[i] == 1:
+                            group_wins[v][group] += 1
+        group_wins_df = pd.DataFrame(group_wins).T.fillna(0).astype(int)
+        group_wins_df = group_wins_df.reindex(variant_order)
+        group_wins_df["total"] = group_wins_df["A"] + group_wins_df["B"]
+        group_wins_df = group_wins_df.sort_values(["total", "A", "B"], ascending=False)
+        group_wins_df = group_wins_df.reindex(variant_order)
+        group_hdr = "\n=== GROUP-BASED WINS (times ranked 1st per group) ==="
+        print(group_hdr)
+        print(render(group_wins_df.reset_index().rename(columns={"index": "variant"})))
 
 
-def write_summary(
-    summary_counts: dict, eval_path: Path, use_color: bool, variant_order=variant_order
-):
+def write_summary(summary_counts: dict, use_color: bool, variant_order=variant_order):
     df_sum = pd.DataFrame(summary_counts).T.fillna(0).astype(int)
     df_sum = df_sum.reindex(variant_order)
 
     df_sum["total_best"] = df_sum["best_perf"] + df_sum["best_fair"]
     df_sum["total_second"] = df_sum["second_perf"] + df_sum["second_fair"]
     df_sum = df_sum.sort_values(["total_best", "total_second"], ascending=False)
+    df_sum = df_sum.reindex(variant_order)
 
     if use_color and not df_sum.empty:
         best_tot = pd.to_numeric(df_sum["total_best"], errors="coerce").max()
@@ -278,7 +261,6 @@ def write_summary(
                 and pd.to_numeric(row["total_best"], errors="coerce") == second_tot
             ):
                 df_sum.at[idx, "total_best"] = f"{YELLOW}{val_best}{RESET}"
-            # Highlight total_second
             val_second = str(row["total_second"])
             if pd.to_numeric(row["total_second"], errors="coerce") == best_tot_second:
                 df_sum.at[idx, "total_second"] = f"{GREEN}{val_second}{RESET}"
@@ -292,18 +274,17 @@ def write_summary(
     summ_hdr = "\n=== OVERALL VARIANT SUMMARY (times ranked 1st / 2nd) ==="
     print(summ_hdr)
     print(render(df_sum.reset_index().rename(columns={"index": "variant"})))
-    with open(eval_path / "evaluation_report.txt", "a", encoding="utf-8") as f:
-        f.write(summ_hdr + "\n")
-        f.write(
-            render(df_sum.reset_index().rename(columns={"index": "variant"})) + "\n"
-        )
 
 
 def main():
     arg = argparse.ArgumentParser()
-    arg.add_argument("--metrics_dir", default="abm_json")
+    arg.add_argument(
+        "--metrics_dir",
+        default="abm_json",
+        help="Base directory for metrics files (will append _static or _dynamic based on --setting)",
+    )
     arg.add_argument("--eval_dir", default="evaluations")
-    arg.add_argument("--model")
+    arg.add_argument("--setting")
     arg.add_argument("--group-eval", action="store_true")
     arg.add_argument("--color", action="store_true")
     arg.add_argument(
@@ -313,7 +294,14 @@ def main():
     )
     a = arg.parse_args()
 
-    df = load_df(a.metrics_dir, a.model, a.group_eval)
+    metrics_dir = a.metrics_dir
+    if a.setting is not None:
+        if a.setting == "static":
+            metrics_dir = f"{metrics_dir}_static"
+        else:
+            metrics_dir = f"{metrics_dir}_dynamic"
+
+    df = load_df(metrics_dir, a.setting, a.group_eval)
     if df.empty:
         print("No matching files.")
         return
@@ -324,10 +312,6 @@ def main():
     else:
         filtered_variant_order = variant_order
 
-    eval_path = Path(a.eval_dir)
-    eval_path.mkdir(exist_ok=True)
-    df.to_csv(eval_path / "evaluation_summary.csv", index=False)
-
     summary_counts = {
         v: {"best_perf": 0, "second_perf": 0, "best_fair": 0, "second_fair": 0}
         for v in filtered_variant_order
@@ -336,14 +320,12 @@ def main():
     write_tables(
         df,
         a.group_eval,
-        eval_path / "evaluation_report.txt",
         use_color=a.color,
         summary_counts=summary_counts,
         variant_order=filtered_variant_order,
     )
     write_summary(
         summary_counts,
-        eval_path,
         use_color=a.color,
         variant_order=filtered_variant_order,
     )

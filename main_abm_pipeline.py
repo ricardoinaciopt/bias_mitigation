@@ -40,12 +40,17 @@ from explainability_wrapper import explainability_analysis
 MAX_TICKS = 10000
 ARRIVAL_RATE = 0.8
 APPROVAL_THRESHOLD = 30
-CSV_DIR, JSON_DIR, XAI_DIR = "abm_csv", "abm_json", "explainability_results"
 NOISE_QUAL = 0.05
 
-os.makedirs(CSV_DIR, exist_ok=True)
-os.makedirs(JSON_DIR, exist_ok=True)
-os.makedirs(XAI_DIR, exist_ok=True)
+
+def get_dirs(setting: str):
+    """Return CSV, JSON, XAI directory names based on setting."""
+    suffix = "_dynamic" if setting == "dynamic" else "_static"
+    return (
+        f"abm_csv{suffix}",
+        f"abm_json{suffix}",
+        f"explainability_results{suffix}",
+    )
 
 
 def replace_nans(obj: Any) -> Any:
@@ -523,6 +528,11 @@ def run_dynamic(
     """
     Runs the dynamic online learning pipeline.
     """
+    CSV_DIR, JSON_DIR, XAI_DIR = get_dirs(setting)
+    os.makedirs(CSV_DIR, exist_ok=True)
+    os.makedirs(JSON_DIR, exist_ok=True)
+    os.makedirs(XAI_DIR, exist_ok=True)
+
     np.random.seed(seed)
     random.seed(seed)
 
@@ -538,56 +548,65 @@ def run_dynamic(
         fairness_constraint,
     )
 
-    param_grid = {
-        "grace_period": [20, 50, 100, 200],
-        "delta": [1e-4, 1e-5, 1e-6],
-        "max_depth": [5, 10, 20, None],
-        "leaf_prediction": ["mc", "nb", "nba"],
-        "split_criterion": ["info_gain", "gini", "hellinger"],
-        "tau": [0.01, 0.05, 0.1],
-        "nb_threshold": [0, 10, 30],
-        "binary_split": [False, True],
-        "remove_poor_attrs": [False, True],
-        "merit_preprune": [True, False],
-    }
-    # For consistency with RandomizedSearchCV (on static, which performs 3 iterations), n_iter is set to 10.
-    sampled_params = list(ParameterSampler(param_grid, n_iter=3, random_state=seed))
-    best_score = -np.inf
-    best_params = None
-
-    logging.info("Starting hyperparameter tuning for online model...")
-    for params in sampled_params:
-        tuning_model = OnlineApprovalClassifier(
-            update_interval=update_interval,
-            calibrate_interval=calibrate_interval,
-            reweight=reweight,
-            group_weights=group_weights,
-            use_mitigator=use_mitigator,
-            fairness_constraint=fairness_constraint,
-            **params,
+    tune_tree = not use_mitigator
+    if not tune_tree:
+        logging.info(
+            "Tree hyper‑parameter tuning skipped " "(tune_tree=%s, use_mitigator=%s).",
+            tune_tree,
+            use_mitigator,
         )
-        _, overall_metrics_tune, _, _ = simulate_dynamic_loop(
-            tuning_model, rep, lbl, seed
-        )
-        score = overall_metrics_tune.get("roc_auc", 0)
-        if np.isnan(score):
-            score = 0
-        logging.debug(f"Tuning run params: {params}, Score (ROC AUC): {score:.4f}")
-        if score > best_score:
-            best_score = score
-            best_params = params
-            logging.debug(f"Found new best score: {best_score:.4f}")
+    if tune_tree:
+        param_grid = {
+            "grace_period": [20, 50, 100, 200],
+            "delta": [1e-4, 1e-5, 1e-6],
+            "max_depth": [5, 10, 20, None],
+            "leaf_prediction": ["mc", "nb", "nba"],
+            "split_criterion": ["info_gain", "gini", "hellinger"],
+            "tau": [0.01, 0.05, 0.1],
+            "nb_threshold": [0, 10, 30],
+            "binary_split": [False, True],
+            "remove_poor_attrs": [False, True],
+            "merit_preprune": [True, False],
+        }
+        # For consistency with RandomizedSearchCV (on static, which performs 3 iterations), n_iter is set to 3.
+        sampled_params = list(ParameterSampler(param_grid, n_iter=3, random_state=seed))
+        best_score = -np.inf
+        best_params = None
 
-    if best_params is None:
-        logging.warning(
-            "Hyperparameter tuning did not find best parameters. Using the first sampled parameters as fallback."
-        )
-        best_params = sampled_params[0] if sampled_params else {}
+        logging.info("Starting hyperparameter tuning for online model...")
+        for params in sampled_params:
+            tuning_model = OnlineApprovalClassifier(
+                update_interval=update_interval,
+                calibrate_interval=calibrate_interval,
+                reweight=reweight,
+                group_weights=group_weights,
+                use_mitigator=use_mitigator,
+                fairness_constraint=fairness_constraint,
+                **params,
+            )
+            _, overall_metrics_tune, _, _ = simulate_dynamic_loop(
+                tuning_model, rep, lbl, seed
+            )
+            score = overall_metrics_tune.get("roc_auc", 0)
+            if np.isnan(score):
+                score = 0
+            logging.debug(f"Tuning run params: {params}, Score (ROC AUC): {score:.4f}")
+            if score > best_score:
+                best_score = score
+                best_params = params
+                logging.debug(f"Found new best score: {best_score:.4f}")
 
-    logging.info(f"Hyperparameter tuning complete. Best ROC AUC: {best_score:.4f}")
-    logging.info(f"Best online parameters found: {best_params}")
+        if best_params is None:
+            logging.warning(
+                "Hyperparameter tuning did not find best parameters. Using the first sampled parameters as fallback."
+            )
+            best_params = sampled_params[0] if sampled_params else {}
 
-    # model with tuned parameters
+        logging.info(f"Hyperparameter tuning complete. Best ROC AUC: {best_score:.4f}")
+        logging.info(f"Best online parameters found: {best_params}")
+    else:
+        best_params = {}
+
     final_model = OnlineApprovalClassifier(
         update_interval=update_interval,
         calibrate_interval=calibrate_interval,
@@ -624,7 +643,9 @@ def run_dynamic(
             reweight_suffix = "_reweight_auto"
     else:
         reweight_suffix = ""
-    tag_base = f"dynamic_rep{rep}_lbl{lbl}{reweight_suffix}_seed{seed}"
+    tag_base = (
+        f"dynamic_rep{rep}_lbl{lbl}_upd{update_interval}{reweight_suffix}_seed{seed}"
+    )
     if use_mitigator:
         tag_base += "_mitigator_" + fairness_constraint
 
@@ -637,7 +658,7 @@ def run_dynamic(
             "No processed agents generated for the final run. Skipping CSV save."
         )
 
-    xai_tag = f"dynamic_rep{rep}_lbl{lbl}_seed{seed}"
+    xai_tag = f"dynamic_rep{rep}_lbl{lbl}_upd{update_interval}_seed{seed}"
     if reweight:
         xai_tag += reweight_suffix
     if group_weights:
@@ -716,6 +737,11 @@ def run_static(
     """
     Runs a static pipeline: Generate data -> Train XGBoost -> Calibrate -> Evaluate.
     """
+    CSV_DIR, JSON_DIR, XAI_DIR = get_dirs("static")
+    os.makedirs(CSV_DIR, exist_ok=True)
+    os.makedirs(JSON_DIR, exist_ok=True)
+    os.makedirs(XAI_DIR, exist_ok=True)
+
     logging.info(
         "Starting static run: rep=%.2f, lbl=%.2f, reweight=%s, group_weights=%s, seed=%d",
         rep,
@@ -996,6 +1022,50 @@ def run_experiment(
     fairness_constraint: str = "demographic_parity",
     XAI: bool = False,
 ) -> Tuple[pd.DataFrame, dict]:
+    # --- Early skip if output JSON already exists ---
+    from pathlib import Path
+    import logging
+
+    # Determine output JSON path using the same logic as at the end of run_dynamic/run_static
+    if setting == "dynamic":
+        _, JSON_DIR, _ = get_dirs(setting)
+        if reweight:
+            if group_weights is not None:
+                group_weights_suffix = "_".join(
+                    f"{k}{v}" for k, v in sorted(group_weights.items())
+                )
+                reweight_suffix = f"_reweight_manual_{group_weights_suffix}"
+            else:
+                reweight_suffix = "_reweight_auto"
+        else:
+            reweight_suffix = ""
+        tag_base = f"dynamic_rep{rep}_lbl{lbl}_upd{update_interval}{reweight_suffix}_seed{seed}"
+        if use_mitigator:
+            tag_base += "_mitigator_" + fairness_constraint
+        json_path = Path(JSON_DIR) / f"metrics_{tag_base}.json"
+    elif setting == "static":
+        _, JSON_DIR, _ = get_dirs("static")
+        if reweight:
+            if group_weights is not None:
+                group_weights_suffix = "_".join(
+                    f"{k}{v}" for k, v in sorted(group_weights.items())
+                )
+                reweight_suffix = f"_reweight_manual_{group_weights_suffix}"
+            else:
+                reweight_suffix = "_reweight_auto"
+        else:
+            reweight_suffix = ""
+        tag = f"static_rep{rep}_lbl{lbl}{reweight_suffix}_seed{seed}"
+        if use_mitigator:
+            tag += "_mitigator_" + fairness_constraint
+        json_path = Path(JSON_DIR) / f"metrics_{tag}.json"
+    else:
+        raise ValueError("Unsupported mode. Use 'static' or 'dynamic'.")
+
+    if json_path.exists():
+        logging.info(f"Skipping run: output already exists at {json_path}")
+        return pd.DataFrame(), {}
+
     if setting == "dynamic":
         return run_dynamic(
             rep=rep,
@@ -1033,7 +1103,7 @@ def main():
     ap.add_argument("--rep", type=float, default=0.5)
     ap.add_argument("--lbl", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--update-interval", type=int, default=int(MAX_TICKS * 0.001))
+    ap.add_argument("--update-interval", type=int, default=int(MAX_TICKS * 0.01))
     ap.add_argument("--calibrate-interval", type=int, default=int(MAX_TICKS * 0.1))
     ap.add_argument("--reweighting", action="store_true")
     ap.add_argument("--group-weights", type=str, default=None)
@@ -1084,10 +1154,6 @@ def main():
         use_mitigator=args.mitigator,
         fairness_constraint=args.fairness_constraint,
         XAI=args.xai,
-    )
-
-    logging.info(
-        "Output files saved in directories: %s, %s, %s.", CSV_DIR, JSON_DIR, XAI_DIR
     )
 
 
