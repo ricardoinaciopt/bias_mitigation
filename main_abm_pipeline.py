@@ -359,6 +359,7 @@ def _process_agents_online(
     xai_tag="",
     X_train_for_xai=None,
     run_XAI=False,
+    XAI_DIR=None,
 ):
     """
     Processes a list of agents using an online model, updating it and collecting metrics.
@@ -451,7 +452,7 @@ def _process_agents_online(
                 }
             )
 
-    if run_explainability and run_XAI:
+    if run_explainability and run_XAI and XAI_DIR:
         # explainability (XAI)
         final_model_state = model.mitigator_model if model.use_mitigator else model
         if (
@@ -459,8 +460,11 @@ def _process_agents_online(
             and not X_train_for_xai.empty
             and X_test_buffer_dicts
         ):
-            logging.info(f"Running explainability analysis with tag: {xai_tag}")
+            logging.info(
+                f"Running explainability analysis with tag: {xai_tag}. Saving to {XAI_DIR}"
+            )
             X_test_df_for_xai = pd.DataFrame(X_test_buffer_dicts, columns=FEATURES)
+
             explainability_analysis(
                 model=final_model_state,
                 X_train=X_train_for_xai,  # full history DataFrame
@@ -483,18 +487,18 @@ def _process_agents_online(
     return results
 
 
-def simulate_dynamic_loop(model, rep, lbl, seed):
+def simulate_dynamic_loop(model, rep, lbl, seed, XAI_DIR):
     """
     Runs a simulation loop for tuning.
     """
     agents = simulate_abm_ticks(rep, lbl, seed, max_ticks=MAX_TICKS)
-
     logging.info("Running dynamic loop for tuning online model...")
     processed_results = _process_agents_online(
         model=model,
         agents=agents,
         calibrate_interval=model.calibrate_interval,
         run_explainability=False,
+        XAI_DIR=XAI_DIR,
     )
 
     overall_metrics, group_metrics, bias_metrics = _calculate_final_metrics(
@@ -524,6 +528,7 @@ def run_dynamic(
     use_mitigator: bool = False,
     fairness_constraint: str = "demographic_parity",
     run_XAI: bool = False,
+    save_results: bool = True,
 ) -> Tuple[pd.DataFrame, dict]:
     """
     Runs the dynamic online learning pipeline.
@@ -585,7 +590,7 @@ def run_dynamic(
                 **params,
             )
             _, overall_metrics_tune, _, _ = simulate_dynamic_loop(
-                tuning_model, rep, lbl, seed
+                tuning_model, rep, lbl, seed, XAI_DIR
             )
             score = overall_metrics_tune.get("roc_auc", 0)
             if np.isnan(score):
@@ -650,9 +655,11 @@ def run_dynamic(
         tag_base += "_mitigator_" + fairness_constraint
 
     csv_path = Path(CSV_DIR) / f"abm_{tag_base}.csv"
-    if not df_final_agents_full.empty:
+    if save_results and not df_final_agents_full.empty:
         df_final_agents_full.to_csv(csv_path, index=False)
         logging.info(f"Saved generated agent data to {csv_path}")
+    elif not df_final_agents_full.empty:
+        logging.info(f"Skipping CSV save (save_results=False): {csv_path}")
     else:
         logging.warning(
             "No processed agents generated for the final run. Skipping CSV save."
@@ -677,6 +684,7 @@ def run_dynamic(
         xai_tag=xai_tag,
         X_train_for_xai=X_full_df_for_xai,
         run_XAI=run_XAI,
+        XAI_DIR=XAI_DIR,
     )
 
     overall_metrics_final, group_metrics_final, bias_metrics_final = (
@@ -706,17 +714,20 @@ def run_dynamic(
     }
 
     json_path = Path(JSON_DIR) / f"metrics_{tag_base}.json"
-    save_fairness_json(
-        path=json_path,
-        group_rows=group_metrics_final,
-        bias_row=bias_metrics_final,
-        meta=meta,
-        overall=overall_metrics_final,
-        per_tick=final_processed_results["metrics_per_tick"],
-        reweight=reweight,
-        group_weights=group_weights,
-    )
-    logging.info(f"Saved final metrics and metadata to {json_path}")
+    if save_results:
+        save_fairness_json(
+            path=json_path,
+            group_rows=group_metrics_final,
+            bias_row=bias_metrics_final,
+            meta=meta,
+            overall=overall_metrics_final,
+            per_tick=final_processed_results["metrics_per_tick"],
+            reweight=reweight,
+            group_weights=group_weights,
+        )
+        logging.info(f"Saved final metrics and metadata to {json_path}")
+    else:
+        logging.info(f"Skipping JSON save (save_results=False): {json_path}")
 
     return (
         pd.DataFrame(final_processed_results["metrics_per_tick"]),
@@ -733,6 +744,7 @@ def run_static(
     use_mitigator: bool = False,
     fairness_constraint: str = "demographic_parity",
     run_XAI: bool = False,
+    save_results: bool = True,
 ) -> Tuple[pd.DataFrame, dict]:
     """
     Runs a static pipeline: Generate data -> Train XGBoost -> Calibrate -> Evaluate.
@@ -989,22 +1001,30 @@ def run_static(
         tag += "_mitigator_" + fairness_constraint
 
     json_path = Path(JSON_DIR) / f"metrics_{tag}.json"
-    save_fairness_json(
-        json_path,
-        group_metrics,
-        bias_metrics,
-        meta,
-        overall=overall_metrics,
-        reweight=reweight,
-        group_weights=group_weights,
-    )
+    if save_results:
+        save_fairness_json(
+            json_path,
+            group_metrics,
+            bias_metrics,
+            meta,
+            overall=overall_metrics,
+            reweight=reweight,
+            group_weights=group_weights,
+        )
+        logging.info(f"Saved final metrics and metadata to {json_path}")
+    else:
+        logging.info(f"Skipping JSON save (save_results=False): {json_path}")
 
     csv_path = (
         Path(CSV_DIR) / f"abm_static_run_{rep}_lbl{lbl}_seed{seed}{reweight_suffix}.csv"
     )
     if use_mitigator:
         csv_path = csv_path.with_name(csv_path.stem + "_mitigator" + csv_path.suffix)
-    df.to_csv(csv_path, index=False)
+    if save_results:
+        df.to_csv(csv_path, index=False)
+        logging.info(f"Saved static agent data to {csv_path}")
+    else:
+        logging.info(f"Skipping CSV save (save_results=False): {csv_path}")
 
     return pd.DataFrame(), overall_metrics
 
@@ -1021,12 +1041,11 @@ def run_experiment(
     use_mitigator: bool = False,
     fairness_constraint: str = "demographic_parity",
     XAI: bool = False,
+    save_results: bool = True,
 ) -> Tuple[pd.DataFrame, dict]:
-    # --- Early skip if output JSON already exists ---
     from pathlib import Path
     import logging
 
-    # Determine output JSON path using the same logic as at the end of run_dynamic/run_static
     if setting == "dynamic":
         _, JSON_DIR, _ = get_dirs(setting)
         if reweight:
@@ -1062,7 +1081,7 @@ def run_experiment(
     else:
         raise ValueError("Unsupported mode. Use 'static' or 'dynamic'.")
 
-    if json_path.exists():
+    if json_path.exists() and save_results:
         logging.info(f"Skipping run: output already exists at {json_path}")
         return pd.DataFrame(), {}
 
@@ -1079,6 +1098,7 @@ def run_experiment(
             use_mitigator=use_mitigator,
             fairness_constraint=fairness_constraint,
             run_XAI=XAI,
+            save_results=save_results,
         )
     elif setting == "static":
         return run_static(
@@ -1090,6 +1110,7 @@ def run_experiment(
             use_mitigator=use_mitigator,
             fairness_constraint=fairness_constraint,
             run_XAI=XAI,
+            save_results=save_results,
         )
     else:
         raise ValueError("Unsupported mode. Use 'static' or 'dynamic'.")
@@ -1115,6 +1136,11 @@ def main():
         help="Fairness constraint to apply if --mitigator is used.",
     )
     ap.add_argument("--xai", action="store_true")
+    ap.add_argument(
+        "--results",
+        action="store_true",
+        help="If set, saves the results (JSON and CSV). If not set, no files are saved.",
+    )
     ap.add_argument(
         "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="INFO"
     )
@@ -1154,6 +1180,7 @@ def main():
         use_mitigator=args.mitigator,
         fairness_constraint=args.fairness_constraint,
         XAI=args.xai,
+        save_results=args.results,
     )
 
 

@@ -58,7 +58,9 @@ def explainability_analysis(
         expl = shap.Explainer(_predict_helper, X_train)
         sv = expl(X_test)
         plt.figure()
-        shap.summary_plot(sv, X_test, feature_names=feature_names, show=False)
+        shap.summary_plot(
+            sv, X_test, feature_names=feature_names, max_display=5, show=False
+        )
         shp_path = os.path.join(output_dir, f"{prefix}_shap_summary.pdf")
         plt.savefig(shp_path, bbox_inches="tight", dpi=500)
         plt.close()

@@ -1,5 +1,6 @@
 from pathlib import Path, PurePath
 import json, re, argparse, pandas as pd
+import os
 
 GREEN, YELLOW, RESET = "\033[1;32m", "\033[33m", "\033[0m"
 BOLD, UNDERLINE = "\033[1m", "\033[4m"
@@ -58,7 +59,9 @@ def load_df(folder: str, setting: str | None, want_groups: bool) -> pd.DataFrame
     return pd.DataFrame(rows)
 
 
-def colourise(df: pd.DataFrame, metrics: list[str], use_color: bool) -> pd.DataFrame:
+def colourise(
+    df: pd.DataFrame, metrics: list[str], use_color: bool, export: bool
+) -> pd.DataFrame:
     out = df.copy().astype(object)
     for c in metrics:
         vals = pd.to_numeric(out[c], errors="coerce")
@@ -76,6 +79,11 @@ def colourise(df: pd.DataFrame, metrics: list[str], use_color: bool) -> pd.DataF
                     s = f"{GREEN}{s}{RESET}"
                 elif rank[i] == 2:
                     s = f"{YELLOW}{s}{RESET}"
+            elif export:
+                if rank[i] == 1:
+                    s = f"**{s}**"
+                elif rank[i] == 2:
+                    s = f"<u>{s}</u>"
             else:
                 if rank[i] == 1:
                     s = f"{BOLD}{s}{RESET}"
@@ -100,6 +108,7 @@ def write_tables(
     use_color: bool,
     summary_counts: dict,
     variant_order=variant_order,
+    export: bool = False,
 ):
     core = [
         "variant",
@@ -181,7 +190,7 @@ def write_tables(
         for v in block.loc[block["rank_fair"] == 2, "variant"]:
             summary_counts[v]["second_fair"] += 1
 
-        block = colourise(block[cols], cols[1:], use_color)
+        block = colourise(block[cols], cols[1:], use_color, export)
         block.columns = header_cols
         table = render(block)
         print(table + "\n")
@@ -211,7 +220,12 @@ def write_tables(
         print(render(group_wins_df.reset_index().rename(columns={"index": "variant"})))
 
 
-def write_summary(summary_counts: dict, use_color: bool, variant_order=variant_order):
+def write_summary(
+    summary_counts: dict,
+    use_color: bool,
+    variant_order=variant_order,
+    export: bool = False,
+):
     df_sum = pd.DataFrame(summary_counts).T.fillna(0).astype(int)
     df_sum = df_sum.reindex(variant_order)
 
@@ -220,7 +234,7 @@ def write_summary(summary_counts: dict, use_color: bool, variant_order=variant_o
     df_sum = df_sum.sort_values(["total_best", "total_second"], ascending=False)
     df_sum = df_sum.reindex(variant_order)
 
-    if use_color and not df_sum.empty:
+    if (use_color or export) and not df_sum.empty:
         best_tot = pd.to_numeric(df_sum["total_best"], errors="coerce").max()
         second_tot = (
             pd.to_numeric(df_sum["total_best"], errors="coerce").nlargest(2).iloc[-1]
@@ -236,11 +250,21 @@ def write_summary(summary_counts: dict, use_color: bool, variant_order=variant_o
             for idx, row in df_sum.iterrows():
                 val = str(row[col])
                 if row[col] == max_val and max_val > 0:
-                    df_sum.at[idx, col] = f"{GREEN}{val}{RESET}"
+                    if use_color:
+                        df_sum.at[idx, col] = f"{GREEN}{val}{RESET}"
+                    elif export:
+                        df_sum.at[idx, col] = f"**{val}**"
+                    else:
+                        df_sum.at[idx, col] = f"{BOLD}{val}{RESET}"
                 elif (
                     second_val is not None and row[col] == second_val and second_val > 0
                 ):
-                    df_sum.at[idx, col] = f"{YELLOW}{val}{RESET}"
+                    if use_color:
+                        df_sum.at[idx, col] = f"{YELLOW}{val}{RESET}"
+                    elif export:
+                        df_sum.at[idx, col] = f"<u>{val}</u>"
+                    else:
+                        df_sum.at[idx, col] = f"{UNDERLINE}{val}{RESET}"
         df_sum = df_sum.astype(object)
         total_best_numeric = pd.to_numeric(df_sum["total_best"], errors="coerce")
         total_second_numeric = pd.to_numeric(df_sum["total_second"], errors="coerce")
@@ -255,21 +279,41 @@ def write_summary(summary_counts: dict, use_color: bool, variant_order=variant_o
         for idx, row in df_sum.iterrows():
             val_best = str(row["total_best"])
             if pd.to_numeric(row["total_best"], errors="coerce") == best_tot:
-                df_sum.at[idx, "total_best"] = f"{GREEN}{val_best}{RESET}"
+                if use_color:
+                    df_sum.at[idx, "total_best"] = f"{GREEN}{val_best}{RESET}"
+                elif export:
+                    df_sum.at[idx, "total_best"] = f"**{val_best}**"
+                else:
+                    df_sum.at[idx, "total_best"] = f"{BOLD}{val_best}{RESET}"
             elif (
                 second_tot is not None
                 and pd.to_numeric(row["total_best"], errors="coerce") == second_tot
             ):
-                df_sum.at[idx, "total_best"] = f"{YELLOW}{val_best}{RESET}"
+                if use_color:
+                    df_sum.at[idx, "total_best"] = f"{YELLOW}{val_best}{RESET}"
+                elif export:
+                    df_sum.at[idx, "total_best"] = f"<u>{val_best}</u>"
+                else:
+                    df_sum.at[idx, "total_best"] = f"{UNDERLINE}{val_best}{RESET}"
             val_second = str(row["total_second"])
             if pd.to_numeric(row["total_second"], errors="coerce") == best_tot_second:
-                df_sum.at[idx, "total_second"] = f"{GREEN}{val_second}{RESET}"
+                if use_color:
+                    df_sum.at[idx, "total_second"] = f"{GREEN}{val_second}{RESET}"
+                elif export:
+                    df_sum.at[idx, "total_second"] = f"**{val_second}**"
+                else:
+                    df_sum.at[idx, "total_second"] = f"{BOLD}{val_second}{RESET}"
             elif (
                 second_tot_second is not None
                 and pd.to_numeric(row["total_second"], errors="coerce")
                 == second_tot_second
             ):
-                df_sum.at[idx, "total_second"] = f"{YELLOW}{val_second}{RESET}"
+                if use_color:
+                    df_sum.at[idx, "total_second"] = f"{YELLOW}{val_second}{RESET}"
+                elif export:
+                    df_sum.at[idx, "total_second"] = f"<u>{val_second}</u>"
+                else:
+                    df_sum.at[idx, "total_second"] = f"{UNDERLINE}{val_second}{RESET}"
 
     summ_hdr = "\n=== OVERALL VARIANT SUMMARY (times ranked 1st / 2nd) ==="
     print(summ_hdr)
@@ -277,6 +321,7 @@ def write_summary(summary_counts: dict, use_color: bool, variant_order=variant_o
 
 
 def main():
+    os.system("cls" if os.name == "nt" else "clear")
     arg = argparse.ArgumentParser()
     arg.add_argument(
         "--metrics_dir",
@@ -287,6 +332,11 @@ def main():
     arg.add_argument("--setting")
     arg.add_argument("--group-eval", action="store_true")
     arg.add_argument("--color", action="store_true")
+    arg.add_argument(
+        "--export",
+        action="store_true",
+        help="Use markdown formatting for bold/underline",
+    )
     arg.add_argument(
         "--vs",
         choices=[v for v in variant_order if v != "none"],
@@ -323,11 +373,13 @@ def main():
         use_color=a.color,
         summary_counts=summary_counts,
         variant_order=filtered_variant_order,
+        export=a.export,
     )
     write_summary(
         summary_counts,
         use_color=a.color,
         variant_order=filtered_variant_order,
+        export=a.export,
     )
 
 
