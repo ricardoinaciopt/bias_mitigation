@@ -153,18 +153,20 @@ def write_tables(
     header_cols = [metric_arrow(c) for c in cols]
 
     for (setting, rep, lbl), g in df.groupby(["setting", "rep", "lbl"]):
+        # Exclude reweight_manual_A1.5_B0.5 from block if not in variant_order (i.e., if --all not passed)
+        block = g.copy()
+        block = block[block["variant"].isin(variant_order)]
         support_A = None
         support_B = None
-        if "A_support" in g.columns and "B_support" in g.columns:
-            support_A = g.iloc[0]["A_support"]
-            support_B = g.iloc[0]["B_support"]
+        if "A_support" in block.columns and "B_support" in block.columns:
+            support_A = block.iloc[0]["A_support"]
+            support_B = block.iloc[0]["B_support"]
         hdr = f"\n=== {setting.upper()} | rep={rep} | lbl={lbl}"
         if support_A is not None and support_B is not None:
             hdr += f" | A_support={support_A} | B_support={support_B}"
         hdr += " ==="
         print(hdr)
 
-        block = g.copy()
         block["order"] = block["variant"].apply(variant_order.index)
         block = block.sort_values("order").drop(columns="order")
 
@@ -181,14 +183,19 @@ def write_tables(
         block["rank_perf"] = block["perf_score"].rank(method="min", ascending=False)
         block["rank_fair"] = block["fair_score"].rank(method="min", ascending=False)
 
+        # Only count for variants in variant_order (i.e., filtered)
         for v in block.loc[block["rank_perf"] == 1, "variant"]:
-            summary_counts[v]["best_perf"] += 1
+            if v in summary_counts:
+                summary_counts[v]["best_perf"] += 1
         for v in block.loc[block["rank_perf"] == 2, "variant"]:
-            summary_counts[v]["second_perf"] += 1
+            if v in summary_counts:
+                summary_counts[v]["second_perf"] += 1
         for v in block.loc[block["rank_fair"] == 1, "variant"]:
-            summary_counts[v]["best_fair"] += 1
+            if v in summary_counts:
+                summary_counts[v]["best_fair"] += 1
         for v in block.loc[block["rank_fair"] == 2, "variant"]:
-            summary_counts[v]["second_fair"] += 1
+            if v in summary_counts:
+                summary_counts[v]["second_fair"] += 1
 
         block = colourise(block[cols], cols[1:], use_color, export)
         block.columns = header_cols
@@ -198,6 +205,7 @@ def write_tables(
     if want_groups:
         group_wins = {v: {"A": 0, "B": 0} for v in variant_order}
         for (setting, rep, lbl), g in df.groupby(["setting", "rep", "lbl"]):
+            g = g[g["variant"].isin(variant_order)]  # filter for group wins as well
             for group in ["A", "B"]:
                 group_metrics = [m for m in groups if m.startswith(f"{group}_")]
                 for m in group_metrics:
@@ -208,7 +216,7 @@ def write_tables(
                     for i, v in g["variant"].items():
                         if pd.isna(vals[i]):
                             continue
-                        if rank[i] == 1:
+                        if rank[i] == 1 and v in group_wins:
                             group_wins[v][group] += 1
         group_wins_df = pd.DataFrame(group_wins).T.fillna(0).astype(int)
         group_wins_df = group_wins_df.reindex(variant_order)
@@ -225,23 +233,22 @@ def write_summary(
     use_color: bool,
     variant_order=variant_order,
     export: bool = False,
+    exclude_manual: bool = False,
 ):
+    filtered_variant_order = [v for v in variant_order if v in summary_counts]
+    if exclude_manual:
+        filtered_variant_order = [
+            v for v in filtered_variant_order if v != "reweight_manual_A1.5_B0.5"
+        ]
     df_sum = pd.DataFrame(summary_counts).T.fillna(0).astype(int)
-    df_sum = df_sum.reindex(variant_order)
+    df_sum = df_sum.reindex(filtered_variant_order)
 
-    df_sum["total_best"] = df_sum["best_perf"] + df_sum["best_fair"]
-    df_sum["total_second"] = df_sum["second_perf"] + df_sum["second_fair"]
-    df_sum = df_sum.sort_values(["total_best", "total_second"], ascending=False)
-    df_sum = df_sum.reindex(variant_order)
+    df_sum = df_sum.sort_values(
+        ["best_perf", "best_fair", "second_perf", "second_fair"], ascending=False
+    )
+    df_sum = df_sum.reindex(filtered_variant_order)
 
     if (use_color or export) and not df_sum.empty:
-        best_tot = pd.to_numeric(df_sum["total_best"], errors="coerce").max()
-        second_tot = (
-            pd.to_numeric(df_sum["total_best"], errors="coerce").nlargest(2).iloc[-1]
-            if len(df_sum) > 1
-            else None
-        )
-
         for col in ["best_perf", "second_perf", "best_fair", "second_fair"]:
             df_sum[col] = df_sum[col].astype(object)
             col_numeric = pd.to_numeric(df_sum[col], errors="coerce")
@@ -266,54 +273,6 @@ def write_summary(
                     else:
                         df_sum.at[idx, col] = f"{UNDERLINE}{val}{RESET}"
         df_sum = df_sum.astype(object)
-        total_best_numeric = pd.to_numeric(df_sum["total_best"], errors="coerce")
-        total_second_numeric = pd.to_numeric(df_sum["total_second"], errors="coerce")
-        best_tot = total_best_numeric.max()
-        second_tot = (
-            total_best_numeric.nlargest(2).iloc[-1] if len(df_sum) > 1 else None
-        )
-        best_tot_second = total_second_numeric.max()
-        second_tot_second = (
-            total_second_numeric.nlargest(2).iloc[-1] if len(df_sum) > 1 else None
-        )
-        for idx, row in df_sum.iterrows():
-            val_best = str(row["total_best"])
-            if pd.to_numeric(row["total_best"], errors="coerce") == best_tot:
-                if use_color:
-                    df_sum.at[idx, "total_best"] = f"{GREEN}{val_best}{RESET}"
-                elif export:
-                    df_sum.at[idx, "total_best"] = f"**{val_best}**"
-                else:
-                    df_sum.at[idx, "total_best"] = f"{BOLD}{val_best}{RESET}"
-            elif (
-                second_tot is not None
-                and pd.to_numeric(row["total_best"], errors="coerce") == second_tot
-            ):
-                if use_color:
-                    df_sum.at[idx, "total_best"] = f"{YELLOW}{val_best}{RESET}"
-                elif export:
-                    df_sum.at[idx, "total_best"] = f"<u>{val_best}</u>"
-                else:
-                    df_sum.at[idx, "total_best"] = f"{UNDERLINE}{val_best}{RESET}"
-            val_second = str(row["total_second"])
-            if pd.to_numeric(row["total_second"], errors="coerce") == best_tot_second:
-                if use_color:
-                    df_sum.at[idx, "total_second"] = f"{GREEN}{val_second}{RESET}"
-                elif export:
-                    df_sum.at[idx, "total_second"] = f"**{val_second}**"
-                else:
-                    df_sum.at[idx, "total_second"] = f"{BOLD}{val_second}{RESET}"
-            elif (
-                second_tot_second is not None
-                and pd.to_numeric(row["total_second"], errors="coerce")
-                == second_tot_second
-            ):
-                if use_color:
-                    df_sum.at[idx, "total_second"] = f"{YELLOW}{val_second}{RESET}"
-                elif export:
-                    df_sum.at[idx, "total_second"] = f"<u>{val_second}</u>"
-                else:
-                    df_sum.at[idx, "total_second"] = f"{UNDERLINE}{val_second}{RESET}"
 
     summ_hdr = "\n=== OVERALL VARIANT SUMMARY (times ranked 1st / 2nd) ==="
     print(summ_hdr)
@@ -342,6 +301,11 @@ def main():
         choices=[v for v in variant_order if v != "none"],
         help="Show only 'none' and the selected variant",
     )
+    arg.add_argument(
+        "--all",
+        action="store_true",
+        help="Include all variants (including reweight_manual_A1.5_B0.5)",
+    )
     a = arg.parse_args()
 
     metrics_dir = a.metrics_dir
@@ -352,6 +316,8 @@ def main():
             metrics_dir = f"{metrics_dir}_dynamic"
 
     df = load_df(metrics_dir, a.setting, a.group_eval)
+    if not a.all:
+        df = df[df["variant"] != "reweight_manual_A1.5_B0.5"]
     if df.empty:
         print("No matching files.")
         return
@@ -380,6 +346,7 @@ def main():
         use_color=a.color,
         variant_order=filtered_variant_order,
         export=a.export,
+        exclude_manual=not a.all,  # pass exclusion flag
     )
 
 
