@@ -8,7 +8,7 @@ import pandas as pd
 import logging
 
 SHAP_SUBSET = 250
-SECOND_ORDER_INSTANCES = 1
+SECOND_ORDER_INSTANCES = 20
 
 
 def explainability_analysis(
@@ -23,14 +23,14 @@ def explainability_analysis(
     feature_names = list(X_test.columns)
     assert list(X_train.columns) == feature_names
 
-    # if the test set is too large, we will only use the last SHAP_SUBSET instances
-    if X_test.shape[0] > SHAP_SUBSET:
-        X_test = X_test.iloc[-SHAP_SUBSET:]
-        logging.info(
-            "Using only the last %d instances of the test set for analysis. New size: %d",
-            SHAP_SUBSET,
-            X_test.shape[0],
-        )
+    # if the test set is too large, we will only use the last SHAP_SUBSET instances (only applicable in first-order SHAP)
+    # if X_test.shape[0] > SHAP_SUBSET:
+    #     X_test = X_test.iloc[-SHAP_SUBSET:]
+    #     logging.info(
+    #         "Using only the last %d instances of the test set for analysis. New size: %d",
+    #         SHAP_SUBSET,
+    #         X_test.shape[0],
+    #     )
 
     if X_train.shape[0] > X_test.shape[0]:
         common_rows = X_train.merge(X_test, how="inner")
@@ -52,21 +52,21 @@ def explainability_analysis(
                 pred = pred[:, 1]
             return pred
 
-    # Standard SHAP
-    logging.info("Computing first-order SHAP values")
-    try:
-        expl = shap.Explainer(_predict_helper, X_train)
-        sv = expl(X_test)
-        plt.figure()
-        shap.summary_plot(
-            sv, X_test, feature_names=feature_names, max_display=5, show=False
-        )
-        shp_path = os.path.join(output_dir, f"{prefix}_shap_summary.pdf")
-        plt.savefig(shp_path, bbox_inches="tight", dpi=500)
-        plt.close()
-        logging.info("SHAP summary saved to %s", shp_path)
-    except Exception as e:
-        logging.error("SHAP failed: %s", e)
+    # Standard SHAP (not used in the paper, but kept for reference)
+    # logging.info("Computing first-order SHAP values")
+    # try:
+    #     expl = shap.Explainer(_predict_helper, X_train)
+    #     sv = expl(X_test)
+    #     plt.figure()
+    #     shap.summary_plot(
+    #         sv, X_test, feature_names=feature_names, max_display=5, show=False
+    #     )
+    #     shp_path = os.path.join(output_dir, f"{prefix}_shap_summary.pdf")
+    #     plt.savefig(shp_path, bbox_inches="tight", dpi=500)
+    #     plt.close()
+    #     logging.info("SHAP summary saved to %s", shp_path)
+    # except Exception as e:
+    #     logging.error("SHAP failed: %s", e)
 
     # SHAP-IQ second-order
     logging.info("Computing second-order interactions with SHAP-IQ")
@@ -83,6 +83,7 @@ def explainability_analysis(
             element = "instance"
             try:
                 logging.info("Explaining %s %d", element, idx)
+
                 iv = si_expl.explain(row.to_numpy())
                 if save_interaction_values:
                     np.save(
@@ -114,44 +115,46 @@ def explainability_analysis(
                 #     )
 
                 # upset plot
-                try:
-                    logging.info("Generating upset plot for %s %d", element, idx)
-                    out_up = upset_plot(
-                        iv,
-                        feature_names=feature_names,
-                        color_matrix=True,
-                        show=False,
-                    )
-                    fig_up = out_up[0] if isinstance(out_up, tuple) else out_up
-                    fig_up.savefig(
-                        os.path.join(
-                            output_dir, f"{prefix}_{element}{idx}_upset_plot.pdf"
-                        ),
-                        bbox_inches="tight",
-                        dpi=500,
-                    )
-                    plt.close(fig_up)
-                except Exception as e:
-                    logging.error(
-                        "Failed to generate upset plot for instance %d: %s", idx, e
-                    )
+                # try:
+                #     logging.info("Generating upset plot for %s %d", element, idx)
+                #     out_up = upset_plot(
+                #         iv,
+                #         feature_names=feature_names,
+                #         color_matrix=True,
+                #         show=False,
+                #     )
+                #     fig_up = out_up[0] if isinstance(out_up, tuple) else out_up
+                #     fig_up.savefig(
+                #         os.path.join(
+                #             output_dir, f"{prefix}_{element}{idx}_upset_plot.pdf"
+                #         ),
+                #         bbox_inches="tight",
+                #         dpi=500,
+                #     )
+                #     plt.close(fig_up)
+                # except Exception as e:
+                #     logging.error(
+                #         "Failed to generate upset plot for instance %d: %s", idx, e
+                #     )
 
                 # network plot
                 try:
                     logging.info("Generating network plot for %s %d", element, idx)
-                    out_net = network_plot(
-                        iv,
-                        feature_names=feature_names,
-                        draw_legend=False,
-                        show=False,
-                    )
+
+                    with plt.rc_context({"font.size": 18}):
+                        out_net = network_plot(
+                            iv,
+                            feature_names=feature_names,
+                            draw_legend=False,
+                            show=False,
+                        )
                     fig_net = out_net[0] if isinstance(out_net, tuple) else out_net
                     fig_net.savefig(
                         os.path.join(
-                            output_dir, f"{prefix}_{element}{idx}_network_plot.pdf"
+                            output_dir, f"{prefix}_{element}{idx}_network_plot.png"
                         ),
                         bbox_inches="tight",
-                        dpi=500,
+                        dpi=1000,
                     )
                     plt.close(fig_net)
                 except Exception as e:
